@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -23,6 +24,8 @@ type CSVSource struct {
 	currentFile   string   // Current file being processed
 	columns       []string // Column names from CSV header
 	totalRows     int      // Total rows across all files
+	totalRowsOnce sync.Once // Ensures totalRows is computed only once
+	totalRowsErr  error    // Error from computing totalRows
 }
 
 func NewCSVSource(cfg *config.Config) (*CSVSource, error) {
@@ -92,26 +95,29 @@ func (s *CSVSource) AdjustBatchSizeAccordingToSourceDbTable() uint64 {
 }
 
 // GetSourceReadRowsCount returns the total number of rows in all CSV files
+// This method is thread-safe and caches the result after first call
 func (s *CSVSource) GetSourceReadRowsCount() (int, error) {
-	if s.totalRows > 0 {
-		return s.totalRows, nil
-	}
-
-	totalRows := 0
-	for _, file := range s.files {
-		count, err := countCSVRows(file)
-		if err != nil {
-			return 0, fmt.Errorf("failed to count rows in %s: %w", file, err)
+	s.totalRowsOnce.Do(func() {
+		totalRows := 0
+		for _, file := range s.files {
+			count, err := s.countCSVRows(file)
+			if err != nil {
+				s.totalRowsErr = fmt.Errorf("failed to count rows in %s: %w", file, err)
+				return
+			}
+			totalRows += count
 		}
-		totalRows += count
-	}
+		s.totalRows = totalRows
+	})
 
-	s.totalRows = totalRows
-	return totalRows, nil
+	if s.totalRowsErr != nil {
+		return 0, s.totalRowsErr
+	}
+	return s.totalRows, nil
 }
 
 // countCSVRows counts the number of data rows in a CSV file (excluding header)
-func countCSVRows(filename string) (int, error) {
+func (s *CSVSource) countCSVRows(filename string) (int, error) {
 	file, err := os.Open(filename)
 	if err != nil {
 		return 0, err
@@ -209,7 +215,18 @@ func (s *CSVSource) QueryTableData(threadNum int, conditionSql string) ([][]inte
 		}
 
 		if len(columns) == 0 {
+			// Use the first non-empty file's columns as the reference schema
 			columns = cols
+		} else if len(cols) > 0 {
+			// Validate that subsequent files have the same columns
+			if len(cols) != len(columns) {
+				return nil, nil, fmt.Errorf("header mismatch in file %s: expected %d columns, got %d columns", file, len(columns), len(cols))
+			}
+			for i := range columns {
+				if columns[i] != cols[i] {
+					return nil, nil, fmt.Errorf("header mismatch in file %s at column %d: expected %q, got %q", file, i, columns[i], cols[i])
+				}
+			}
 		}
 
 		allData = append(allData, data...)
@@ -229,6 +246,7 @@ func (s *CSVSource) QueryTableData(threadNum int, conditionSql string) ([][]inte
 }
 
 // readCSVFile reads a specific range of rows from a CSV file
+// Optimized to skip rows before startRow to improve performance for parallel processing
 func (s *CSVSource) readCSVFile(filename string, startRow, endRow, currentRow uint64) ([][]interface{}, []string, uint64, error) {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -247,8 +265,21 @@ func (s *CSVSource) readCSVFile(filename string, startRow, endRow, currentRow ui
 	var data [][]interface{}
 	rowNum := currentRow
 
-	// Read all rows
-	for {
+	// Skip rows before startRow for better performance
+	for rowNum < startRow {
+		_, err := reader.Read()
+		if err == io.EOF {
+			// Reached end of file before startRow
+			return data, header, rowNum - 1, nil
+		}
+		if err != nil {
+			return nil, nil, 0, fmt.Errorf("failed to skip row: %w", err)
+		}
+		rowNum++
+	}
+
+	// Read rows in the desired range
+	for rowNum < endRow {
 		record, err := reader.Read()
 		if err == io.EOF {
 			break
@@ -257,29 +288,27 @@ func (s *CSVSource) readCSVFile(filename string, startRow, endRow, currentRow ui
 			return nil, nil, 0, fmt.Errorf("failed to read row: %w", err)
 		}
 
-		// Check if this row is in the desired range
-		if rowNum >= startRow && rowNum < endRow {
-			// Convert string values to interface{}
-			row := make([]interface{}, len(record))
-			for i, val := range record {
-				row[i] = convertCSVValue(val)
-			}
-			data = append(data, row)
+		// Convert string values to interface{}
+		row := make([]interface{}, len(record))
+		for i, val := range record {
+			row[i] = convertCSVValue(val)
 		}
-
+		data = append(data, row)
 		rowNum++
-
-		// If we've passed the end row, stop reading this file
-		if rowNum >= endRow {
-			break
-		}
 	}
 
 	return data, header, rowNum - 1, nil
 }
 
 // convertCSVValue attempts to convert CSV string values to appropriate types
+// Empty strings are returned as empty strings (not nil) to maintain consistency
 func convertCSVValue(val string) interface{} {
+	// Handle empty strings - return as-is
+	// Note: Empty CSV cells will be imported as empty strings in Databend
+	if val == "" {
+		return val
+	}
+
 	// Try to parse as integer
 	if intVal, err := strconv.ParseInt(val, 10, 64); err == nil {
 		return intVal
@@ -303,7 +332,8 @@ func convertCSVValue(val string) interface{} {
 }
 
 // parseRowCondition parses a condition like "(row_num >= 1 and row_num < 1001)"
-// and returns the start and end row numbers
+// Supports both >= and > for start condition, and both < and <= for end condition
+// Returns the start and end row numbers
 func parseRowCondition(condition string) (uint64, uint64, error) {
 	// Remove parentheses and split by "and"
 	condition = strings.Trim(condition, "()")
@@ -316,7 +346,7 @@ func parseRowCondition(condition string) (uint64, uint64, error) {
 	var startRow, endRow uint64
 	var err error
 
-	// Parse first part (e.g., "row_num >= 1")
+	// Parse first part (e.g., "row_num >= 1" or "row_num > 0")
 	if strings.Contains(parts[0], ">=") {
 		fields := strings.Split(parts[0], ">=")
 		if len(fields) != 2 {
@@ -326,9 +356,21 @@ func parseRowCondition(condition string) (uint64, uint64, error) {
 		if err != nil {
 			return 0, 0, fmt.Errorf("failed to parse start row: %w", err)
 		}
+	} else if strings.Contains(parts[0], ">") {
+		fields := strings.Split(parts[0], ">")
+		if len(fields) != 2 {
+			return 0, 0, fmt.Errorf("invalid start condition: %s", parts[0])
+		}
+		startRow, err = strconv.ParseUint(strings.TrimSpace(fields[1]), 10, 64)
+		if err != nil {
+			return 0, 0, fmt.Errorf("failed to parse start row: %w", err)
+		}
+		startRow++ // Convert > to >=
+	} else {
+		return 0, 0, fmt.Errorf("invalid start condition (missing >= or >): %s", parts[0])
 	}
 
-	// Parse second part (e.g., "row_num < 1001")
+	// Parse second part (e.g., "row_num < 1001" or "row_num <= 1000")
 	if strings.Contains(parts[1], "<=") {
 		fields := strings.Split(parts[1], "<=")
 		if len(fields) != 2 {
@@ -348,6 +390,8 @@ func parseRowCondition(condition string) (uint64, uint64, error) {
 		if err != nil {
 			return 0, 0, fmt.Errorf("failed to parse end row: %w", err)
 		}
+	} else {
+		return 0, 0, fmt.Errorf("invalid end condition (missing < or <=): %s", parts[1])
 	}
 
 	return startRow, endRow, nil
