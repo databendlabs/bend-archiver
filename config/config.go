@@ -51,6 +51,9 @@ type Config struct {
 	SourceSplitTimeKey string `json:"SourceSplitTimeKey"`           // time field for split table
 	TimeSplitUnit      string `json:"TimeSplitUnit" default:"hour"` // time split unit, default is hour, option is: minute, hour, day
 
+	// CSV specific configuration
+	SourceCSVPath string `json:"sourceCSVPath"` // path to CSV file or directory containing CSV files
+
 	// Databend configuration
 	DatabendDSN      string `json:"databendDSN" default:"localhost:8000"`
 	DatabendTable    string `json:"databendTable"`
@@ -94,6 +97,24 @@ func preCheckConfig(cfg *Config) {
 	if cfg.MaxThread == 0 {
 		cfg.MaxThread = 1
 	}
+
+	// For CSV files, skip database-specific validations
+	if cfg.DatabaseType == "csv" {
+		if cfg.SourceCSVPath == "" {
+			panic("sourceCSVPath must be set for CSV database type")
+		}
+		// For CSV, we use row numbers as split key, so we set a default
+		if cfg.SourceSplitKey == "" {
+			cfg.SourceSplitKey = "row_num"
+		}
+		// Set a default where condition for CSV
+		if cfg.SourceWhereCondition == "" {
+			cfg.SourceWhereCondition = "row_num >= 1"
+		}
+		return
+	}
+
+	// Database-specific validations
 	if cfg.SourceSplitKey != "" && cfg.SourceSplitTimeKey != "" {
 		panic("cannot set both sourceSplitKey and sourceSplitTimeKey")
 	}

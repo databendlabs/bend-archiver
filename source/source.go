@@ -40,6 +40,8 @@ func NewSource(cfg *config.Config) (Sourcer, error) {
 		return NewOracleSource(cfg)
 	case "mssql":
 		return NewSqlServerSource(cfg)
+	case "csv":
+		return NewCSVSource(cfg)
 	default:
 		return NewMysqlSource(cfg)
 	}
