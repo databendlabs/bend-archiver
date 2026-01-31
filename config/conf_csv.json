@@ -1,0 +1,13 @@
+{
+  "databaseType": "csv",
+  "sourceCSVPath": "./test_data.csv",
+  "databendDSN": "databend://root:@localhost:8000?sslmode=disable",
+  "databendTable": "default.test_csv",
+  "batchSize": 5,
+  "maxThread": 2,
+  "copyPurge": true,
+  "copyForce": false,
+  "disableVariantCheck": true,
+  "userStage": "~",
+  "deleteAfterSync": false
+}

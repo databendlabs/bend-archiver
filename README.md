@@ -8,8 +8,8 @@ Archive data from common databases into Databend with parallel sync (by key or t
 | PostgreSQL |    Yes    |
 | TiDB       |    Yes    |
 | SQL Server |    Yes    |
+| CSV        |    Yes    |
 | Oracle     | Coming soon |
-| CSV        | Coming soon |
 | NDJSON     | Coming soon |
 
 ## Install
@@ -21,18 +21,19 @@ Create `config/conf.json`.
 Parameters (defaults are from code):
 | Key | Required | Default | Notes |
 |:----|:--------:|:--------|:------|
-| `databaseType` | No | `mysql` | `mysql`, `tidb`, `pg`, `mssql`, `oracle` |
-| `sourceHost` | Yes | - | Source host |
-| `sourcePort` | Yes | - | Source port |
-| `sourceUser` | Yes | - | Source user |
-| `sourcePass` | Yes | - | Source password |
+| `databaseType` | No | `mysql` | `mysql`, `tidb`, `pg`, `mssql`, `oracle`, `csv` |
+| `sourceHost` | For DB sources | - | Source host |
+| `sourcePort` | For DB sources | - | Source port |
+| `sourceUser` | For DB sources | - | Source user |
+| `sourcePass` | For DB sources | - | Source password |
 | `sourceDB` | If no `sourceDbTables` | - | Source database |
 | `sourceTable` | If no `sourceDbTables` | - | Source table |
+| `sourceCSVPath` | For CSV only | - | Path to CSV file or directory |
 | `sourceDbTables` | No | `[]` | Multi-table: `["dbRegex@tableRegex"]` |
 | `sourceQuery` | No | - | Currently ignored |
-| `sourceWhereCondition` | Yes | - | WHERE clause without `WHERE` |
-| `sourceSplitKey` | If key split | - | Integer primary key |
-| `sourceSplitTimeKey` | If time split | - | Time column |
+| `sourceWhereCondition` | For DB sources | - | WHERE clause without `WHERE` |
+| `sourceSplitKey` | If key split | - | Integer primary key (auto-set for CSV) |
+| `sourceSplitTimeKey` | If time split | - | Time column (not supported for CSV) |
 | `timeSplitUnit` | If time split | `hour` | `minute`, `quarter`, `hour`, `day` |
 | `sslMode` | No | `disable` | Postgres only |
 | `databendDSN` | Yes | `localhost:8000` | Databend DSN |
@@ -43,14 +44,15 @@ Parameters (defaults are from code):
 | `copyForce` | No | `false` | Databend COPY option |
 | `disableVariantCheck` | No | `true` | Databend COPY option |
 | `userStage` | No | `~` | Databend stage |
-| `deleteAfterSync` | No | `false` | Deletes source rows |
+| `deleteAfterSync` | No | `false` | Deletes source rows/files |
 | `maxThread` | No | `1` | Max concurrency |
 | `oracleSID` | No | - | Oracle SID |
 
 Rules:
-- `sourceWhereCondition` is always required; for time split use `t >= '...' and t < '...'` with `YYYY-MM-DD HH:MM:SS`.
+- `sourceWhereCondition` is always required for database sources; for time split use `t >= '...' and t < '...'` with `YYYY-MM-DD HH:MM:SS`.
 - `sourceSplitKey` and `sourceSplitTimeKey` are mutually exclusive.
 - For time split, `timeSplitUnit` is required.
+- For CSV sources, only `sourceCSVPath` is required (other source parameters are ignored).
 
 Example (key split):
 ```json
@@ -80,6 +82,19 @@ Example (time split keys):
 }
 ```
 
+Example (CSV file or directory):
+```json
+{
+  "databaseType": "csv",
+  "sourceCSVPath": "/path/to/data.csv",
+  "databendDSN": "databend://username:password@localhost:8000?sslmode=disable",
+  "databendTable": "default.my_table",
+  "batchSize": 10000,
+  "maxThread": 4,
+  "deleteAfterSync": false
+}
+```
+
 ## Run
 ```bash
 ./bend-archiver -f config/conf.json
@@ -94,8 +109,35 @@ go build -o bend-archiver ./cmd
 
 ### Tests
 ```bash
+# Run all tests
 go test ./...
+
+# Run only unit tests (no external services needed)
+go test ./source ./config
+
+# Run CSV tests specifically
+go test -v ./source -run CSV
+go test -v ./config -run TestPreCheckConfig_CSV
+go test -v ./cmd -run TestCSV
 ```
+
+#### Running tests with Docker
+
+For end-to-end tests, you need Databend and MySQL running:
+
+```bash
+# Quick start - run all CSV tests with Docker
+./test-csv.sh
+
+# Or manually start services
+docker-compose -f docker-compose.test.yml up -d
+sleep 30
+go test -v ./...
+docker-compose -f docker-compose.test.yml down
+```
+
+See [CSV_TESTING.md](CSV_TESTING.md) for detailed testing instructions.
+
 Tests in `cmd` and `source` expect local databases (Databend plus the source DBs in the tests).
 
 ### Run from source
@@ -107,3 +149,9 @@ go run ./cmd -f config/conf.json
 - Multi-table sync uses regex in `sourceDbTables` (example: `["^mydb$@^test_table_.*$"]`).
 - The MySQL driver reports BOOL as `TINYINT(1)`, so use `TINYINT` in Databend for boolean columns.
 - COPY options reference: https://docs.databend.com/sql/sql-commands/dml/dml-copy-into-table#copy-options
+- CSV files:
+  - First row must be column headers
+  - Supports single file or directory (all `.csv` files)
+  - Automatically detects data types (integers, floats, booleans, strings)
+  - Uses row numbers for parallel processing
+  - Set `deleteAfterSync: true` to remove CSV files after successful import

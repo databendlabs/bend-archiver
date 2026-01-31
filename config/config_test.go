@@ -102,3 +102,67 @@ func TestGetTimeRangeBySplitUnit(t *testing.T) {
 		})
 	}
 }
+
+// TestPreCheckConfig_CSV tests CSV configuration validation
+func TestPreCheckConfig_CSV(t *testing.T) {
+	tests := []struct {
+		name      string
+		config    *Config
+		wantPanic bool
+	}{
+		{
+			name: "valid CSV config",
+			config: &Config{
+				DatabaseType:  "csv",
+				SourceCSVPath: "/path/to/data.csv",
+				DatabendDSN:   "localhost:8000",
+				DatabendTable: "default.test",
+				BatchSize:     1000,
+			},
+			wantPanic: false,
+		},
+		{
+			name: "CSV config without sourceCSVPath",
+			config: &Config{
+				DatabaseType:  "csv",
+				DatabendDSN:   "localhost:8000",
+				DatabendTable: "default.test",
+				BatchSize:     1000,
+			},
+			wantPanic: true,
+		},
+		{
+			name: "CSV config with auto-set split key",
+			config: &Config{
+				DatabaseType:  "csv",
+				SourceCSVPath: "/path/to/data.csv",
+				DatabendDSN:   "localhost:8000",
+				DatabendTable: "default.test",
+				BatchSize:     1000,
+			},
+			wantPanic: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				r := recover()
+				if (r != nil) != tt.wantPanic {
+					t.Errorf("preCheckConfig() panic = %v, wantPanic %v", r, tt.wantPanic)
+				}
+			}()
+			preCheckConfig(tt.config)
+
+			// For valid CSV configs, check that defaults are set
+			if !tt.wantPanic && tt.config.DatabaseType == "csv" {
+				if tt.config.SourceSplitKey != "row_num" {
+					t.Errorf("Expected SourceSplitKey to be 'row_num', got '%s'", tt.config.SourceSplitKey)
+				}
+				if tt.config.SourceWhereCondition != "row_num >= 1" {
+					t.Errorf("Expected SourceWhereCondition to be 'row_num >= 1', got '%s'", tt.config.SourceWhereCondition)
+				}
+			}
+		})
+	}
+}
