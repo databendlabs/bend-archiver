@@ -121,25 +121,6 @@ go test -v ./config -run TestPreCheckConfig_CSV
 go test -v ./cmd -run TestCSV
 ```
 
-#### Running tests with Docker
-
-For end-to-end tests, you need Databend and MySQL running:
-
-```bash
-# Quick start - run all CSV tests with Docker
-./test-csv.sh
-
-# Or manually start services
-docker-compose -f docker-compose.test.yml up -d
-sleep 30
-go test -v ./...
-docker-compose -f docker-compose.test.yml down
-```
-
-See [CSV_TESTING.md](CSV_TESTING.md) for detailed testing instructions.
-
-Tests in `cmd` and `source` expect local databases (Databend plus the source DBs in the tests).
-
 ### Run from source
 ```bash
 go run ./cmd -f config/conf.json
