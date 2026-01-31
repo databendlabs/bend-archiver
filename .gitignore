@@ -15,7 +15,6 @@
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
-bend-ingest-kafka
 bend-archiver
 cmd/bend-arcihver
 
